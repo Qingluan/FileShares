@@ -1,4 +1,5 @@
 import argparse, os, sys
+from termcolor import cprint
 from cmd import Cmd
 from functools import partial
 from .server import ServerHandler, Monitor

@@ -10,16 +10,18 @@ from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 
 from .base import Dir, IO,Encry, FileNotFoundErr
-from .config import loger
+from .config import loger, ENV, PATH_DEL
 
 def send_msg(fp, cmd, data, key=b'what#@!$THeFuck!@$You'):
     if not isinstance(data, bytes):
         data = pickle.dumps(data)
     l = len(data)
     loger.debug(colored("l: %d" % l,'yellow'))
+    fp.send(cmd + pack('>I', l))
+    for i in Encry.stream(data, key):
+        fp.send(bytes([i]))
+
     
-    data = bytes(Encry.stream(data, key))
-    fp.sendall(cmd + pack('>I', l) + data)
 
 
 def read_msg(fp, key=b'what#@!$THeFuck!@$You'):
@@ -33,7 +35,7 @@ def read_msg(fp, key=b'what#@!$THeFuck!@$You'):
         print(colored("read continue: %%%.3f" % per ,'magenta'),end='\r')
         data += fp.recv(rl-l)
         l = len(data)
-
+    print(colored('read ok ','green'),end='\r')
     data = bytes(Encry.stream(data, key))
     return cmd, l, data
 
@@ -101,13 +103,32 @@ class ServerHandler(BaseRequestHandler):
     def save_file(self, data):
         head_l, = unpack(">I", data[:4])
         head = pickle.loads(data[4:4 + head_l])
+
+        if  PATH_DEL not in head.path:
+            if ENV[0][:3] == "win":
+                head.path = head.path.replace("/","\\")
+            else:
+                head.path = head.path.replace("\\","/")
+
+            if head.path.startswith("."+PATH_DEL):
+                head.path = head.path[2:]
+
         dirs_path = os.path.dirname(head.path)
 
         if not os.path.exists(dirs_path):
-            os.makedirs(dirs_path)
+            try:
+                os.makedirs(dirs_path)
+            except FileExistsError:
+                pass
+            except FileNotFoundError:
+                pass
+
         loger.debug("save file : " + head.path)
-        with open(os.path.join(ServerHandler.root, head.path), 'wb') as fp:
-            fp.write(data[4 + head_l:])
+        try:
+            with open(os.path.join(ServerHandler.root, head.path), 'wb') as fp:
+                fp.write(data[4 + head_l:])
+        except PermissionError:
+            loger.warning(colored("write file[%s] no permission!" % head.path))
 
     def ready_file(self, file_hash):
         loger.debug(colored("Search: "+ file_hash, 'red'))
@@ -191,7 +212,7 @@ class Client:
                 path = file_path.replace(Client.root, '.')
                 header = pickle.dumps(Header(os.path.basename(path), path))
                 header_l = pack(">I", len(header))
-                print("ready: " + file)
+                loger.info("ready: " + file)
                 c,l,r = self.cmd(b'f', header_l + header + data)
                 return file,r
 
@@ -201,10 +222,23 @@ class Client:
     def save_file(self, data):
         head_l, = unpack(">I", data[:4])
         head = pickle.loads(data[4:4 + head_l])
-        dirs_path = os.path.dirname(head.path)
+        if  PATH_DEL not in head.path:
+            if ENV[0][:3] == "win":
+                head.path = head.path.replace("/","\\")
+            else:
+                head.path = head.path.replace("\\","/")
 
+
+        dirs_path = os.path.dirname(head.path)
+        loger.debug("   file : " + dirs_path)
         if not os.path.exists(dirs_path):
-            os.makedirs(dirs_path)
+            try:
+                os.makedirs(dirs_path)
+            except FileNotFoundError as e:
+                loger.warning(colored("failed mkdir : %s" %  dirs_path,'red'))
+
+
+                # return False
         e = os.path.join(Client.root, head.path)
         cprint("abs : %s" % os.path.abspath(e),"blue")
         with open(e, 'wb') as fp:
@@ -216,18 +250,15 @@ class Client:
         
         hash_set = pickle.loads(res)
         hash_set_local = set(Dir(Client.root, Client.io).all())
-        
-
-        
-        
 
         need_download_hash = hash_set - hash_set_local
-        loger.debug(colored(need_download_hash, "green"))
+        loger.debug("D : "+colored(need_download_hash, "green"))
         c, rl, res = self.cmd(b'l', need_download_hash)
-        loger.debug("need got: %d , got: %d" %(rl, len(res)))
+        # loger.debug("need got: %d , got: %d" %(rl, len(res)))
         files = pickle.loads(res)
         c = 0
         loger.debug("ready to save %d " % len(files))
+        # loger.debug(files)
         for f in files:
             self.save_file(f)
             c += 1
@@ -240,10 +271,12 @@ class Client:
         if isinstance(data, bytes):
             l = len(data)
             D += pack('>I', l)
+            loger.debug("encrypting data")
             data = bytes(Encry.stream(data, key))
             D += data
         else:
             data = pickle.dumps(data)
+            loger.debug("encrypting data")
             data = bytes(Encry.stream(data, key))
             l = len(data)
             D += pack('>I', l)
@@ -263,7 +296,7 @@ class Client:
                 print(colored("read continue: %%%.3f" % per ,'magenta'),end='\r')
                 res += s.recv(rl-l)
                 l = len(res)
-
+            print(colored('read ok ','green'),end='\r')
             res = bytes(Encry.stream(res, key))
             return cmd, rl, res
         except OSError as e:
@@ -298,9 +331,10 @@ class Monitor:
 
         # loger.debug("tmp upload {}".format(self.tmp_upload))
         d = set(Dir(self.root, self.io).all())
-        loger.debug(d)
-        loger.debug(old_d)
+        # loger.debug(d)
+        # loger.debug(old_d)
         new_s =  d - old_d
+        loger.debug("N : " + colored(new_s,"blue"))
         loger.debug(colored("upload : %d " % len(new_s), "green"))
         for f in new_s:
             file = self.io[f]
@@ -318,7 +352,7 @@ class Monitor:
                 self.check_uploads(self.old_d)
                 self.client.check()
                     
-            except Exception as e:
+            except TypeError as e:
                 loger.error(e)
             sleep(self.inter)
 
